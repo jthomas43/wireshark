@@ -3,7 +3,7 @@
 //#include <epan/expert.h>
 #include <epan/conversation.h>
 
-static int proto_udx          = -1;  /* -1 = uninitialized for wireguard */
+static int proto_udx          = -1;
 static dissector_handle_t udx_handle;
 
 static int hf_udx_magic_byte  = -1;
@@ -34,31 +34,12 @@ static int ett_udx            = -1;
 #define UDX_HEADER_MESSAGE 0b01000
 #define UDX_HEADER_DESTROY 0b10000
 
-//   // 8 bit magic byte + 8 bit version + 8 bit type + 8 bit extensions
-//   *(b++) = UDX_MAGIC_BYTE;
-//   *(b++) = UDX_VERSION;
-//   *(b++) = (uint8_t) type;
-//   *(b++) = 0; // data offset
-// 
-//   uint32_t *i = (uint32_t *) b;
-// 
-//   // 32 bit (le) remote id
-//   *(i++) = udx__swap_uint32_if_be(stream->remote_id);
-//   // 32 bit (le) recv window
-//   *(i++) = 0xffffffff; // hardcode max recv window
-//   // 32 bit (le) seq
-//   *(i++) = udx__swap_uint32_if_be(stream->seq);
-//   // 32 bit (le) ack
-//   *(i++) = udx__swap_uint32_if_be(stream->ack);
-
-
-
 static hf_register_info hf[] = {
     {
-        &hf_udx_magic_byte,         /* index */
+        &hf_udx_magic_byte,
         {
-            "UDX Magic Byte",       /* label */
-            "udx.magic_byte",       // for display filter
+            "UDX Magic Byte",
+            "udx.magic_byte",
             FT_UINT8,
             BASE_HEX,
             NULL,
