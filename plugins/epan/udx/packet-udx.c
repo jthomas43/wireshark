@@ -3,20 +3,20 @@
 //#include <epan/expert.h>
 #include <epan/conversation.h>
 
-static int proto_udx          = -1;
+static int proto_udx             = -1;
 static dissector_handle_t udx_handle;
 
-static int hf_udx_magic_byte  = -1;
-static int hf_udx_version     = -1;
-static int hf_udx_type        = -1;
-static int hf_udx_data_offset = -1;
-static int hf_udx_remote_id   = -1;
-static int hf_udx_window      = -1;
-static int hf_udx_seqno       = -1;
-static int hf_udx_ack         = -1;
-static int hf_udx_sack_start  = -1;
-static int hf_udx_sack_end    = -1;
-static int hf_udx_payload     = -1;
+static int hf_udx_magic_byte     = -1;
+static int hf_udx_version        = -1;
+static int hf_udx_type           = -1;
+static int hf_udx_data_offset    = -1;
+static int hf_udx_id             = -1;
+static int hf_udx_window         = -1;
+static int hf_udx_seqno          = -1;
+static int hf_udx_ack            = -1;
+static int hf_udx_sack_start     = -1;
+static int hf_udx_sack_end       = -1;
+static int hf_udx_payload        = -1;
 
 static int hf_udx_type_data      = -1;
 static int hf_udx_type_end       = -1;
@@ -26,7 +26,7 @@ static int hf_udx_type_destroy   = -1;
 
 
 
-static int ett_udx            = -1;
+static int ett_udx               = -1;
 
 #define UDX_HEADER_DATA    0b00001
 #define UDX_HEADER_END     0b00010
@@ -144,7 +144,7 @@ static hf_register_info hf[] = {
             HFILL
         },
     }, {
-        &hf_udx_remote_id,
+        &hf_udx_id,
         {
             "Id",
             "udx.id",
@@ -270,7 +270,28 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
     };
 
     
-    col_add_fstr(pinfo->cinfo, COL_INFO, "%d -> %d %s", pinfo->srcport, pinfo->destport, pkt_type ? " Flags: " : "");
+
+    proto_item *ti = proto_tree_add_item(tree, proto_udx, tvb, 0, -1, ENC_NA);
+
+    proto_tree *udx_tree = proto_item_add_subtree(ti, ett_udx);
+
+    proto_tree_add_item(udx_tree, hf_udx_magic_byte,           tvb, 0,  1, ENC_LITTLE_ENDIAN);
+    proto_tree_add_item(udx_tree, hf_udx_version,              tvb, 1,  1, ENC_LITTLE_ENDIAN);
+    proto_tree_add_bitmask(udx_tree,                           tvb, 2, hf_udx_type, ett_udx, type_flags, ENC_NA);
+
+    guint32 data_offset, id, window, seq, ack;
+    proto_tree_add_item_ret_uint(udx_tree, hf_udx_data_offset, tvb, 3,  1, ENC_LITTLE_ENDIAN, &data_offset);
+    proto_tree_add_item_ret_uint(udx_tree, hf_udx_id,          tvb, 4,  4, ENC_LITTLE_ENDIAN, &id);
+    proto_tree_add_item_ret_uint(udx_tree, hf_udx_window,      tvb, 8,  4, ENC_LITTLE_ENDIAN, &window);
+
+    proto_tree_add_item_ret_uint(udx_tree, hf_udx_seqno,       tvb, 12, 4, ENC_LITTLE_ENDIAN, &seq);
+    proto_tree_add_item_ret_uint(udx_tree, hf_udx_ack,         tvb, 16, 4, ENC_LITTLE_ENDIAN, &ack);
+
+    col_add_fstr(pinfo->cinfo, COL_INFO, "%u -> %u id=%u seq=%u ack=%u ", pinfo->srcport, pinfo->destport, id, seq, ack);
+
+    if (pkt_type) {
+        col_append_fstr(pinfo->cinfo, COL_INFO, "Flags: ");
+    }
 
     for (unsigned int i = 0; i < (sizeof(lookup) / sizeof(lookup[0])); i++) {
         if (pkt_type & lookup[i].i) {
@@ -278,26 +299,6 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
         }
     }
     
-
-    proto_item *ti = proto_tree_add_item(tree, proto_udx, tvb, 0, -1, ENC_NA);
-
-    proto_tree *udx_tree = proto_item_add_subtree(ti, ett_udx);
-
-    proto_tree_add_item(udx_tree, hf_udx_magic_byte,  tvb, 0,  1, ENC_LITTLE_ENDIAN);
-    proto_tree_add_item(udx_tree, hf_udx_version,     tvb, 1,  1, ENC_LITTLE_ENDIAN);
-    proto_tree_add_bitmask(udx_tree, tvb, 2, hf_udx_type, ett_udx, type_flags, ENC_NA);
-
-    guint32 data_offset;
-    proto_tree_add_item_ret_uint(udx_tree, hf_udx_data_offset, tvb, 3,  1, ENC_LITTLE_ENDIAN, &data_offset);
-    proto_tree_add_item(udx_tree, hf_udx_remote_id,   tvb, 4,  4, ENC_LITTLE_ENDIAN);
-    proto_tree_add_item(udx_tree, hf_udx_window,      tvb, 8,  4, ENC_LITTLE_ENDIAN);
-
-    guint32 seqno = 0xffffffff;
-    guint32 ackno = 0xffffffff;
-
-    proto_tree_add_item_ret_uint(udx_tree, hf_udx_seqno,       tvb, 12, 4, ENC_LITTLE_ENDIAN, &seqno);
-    proto_tree_add_item_ret_uint(udx_tree, hf_udx_ack,         tvb, 16, 4, ENC_LITTLE_ENDIAN, &ackno);
-
     unsigned int offset = 20;
 
     if (pkt_type & UDX_HEADER_SACK) {
