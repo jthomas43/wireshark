@@ -62,7 +62,7 @@ static hf_register_info hf[] = {
     }, {
         &hf_udx_type,
         {
-            "type",
+            "Type",
             "udx.type",
             FT_UINT8,
             BASE_HEX,
@@ -74,7 +74,7 @@ static hf_register_info hf[] = {
     }, {
         &hf_udx_type_data,
         {
-            "Data Flag",
+            "Data",
             "udx.type.data",
             FT_BOOLEAN,
             8,
@@ -86,7 +86,7 @@ static hf_register_info hf[] = {
     }, {
          &hf_udx_type_end,
         {
-            "End Stream Flag",
+            "End",
             "udx.type.end",
             FT_BOOLEAN,
             8,
@@ -98,7 +98,7 @@ static hf_register_info hf[] = {
     }, {
          &hf_udx_type_sack,
         {
-            "SACK Flag",
+            "SACK",
             "udx.type.sack",
             FT_BOOLEAN,
             8,
@@ -110,7 +110,7 @@ static hf_register_info hf[] = {
     }, {
          &hf_udx_type_message,
         {
-            "Message Flag",
+            "Message",
             "udx.type.message",
             FT_BOOLEAN,
             8,
@@ -122,7 +122,7 @@ static hf_register_info hf[] = {
     }, {
          &hf_udx_type_destroy,
         {
-            "Destroy Stream Flag",
+            "Destroy",
             "udx.type.destroy",
             FT_BOOLEAN,
             8,
@@ -134,7 +134,7 @@ static hf_register_info hf[] = {
     }, {
         &hf_udx_data_offset,
         {
-            "Offset",
+            "Data Offset",
             "udx.offset",
             FT_UINT8,
             BASE_HEX,
@@ -287,10 +287,10 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
     proto_tree_add_item_ret_uint(udx_tree, hf_udx_seqno,       tvb, 12, 4, ENC_LITTLE_ENDIAN, &seq);
     proto_tree_add_item_ret_uint(udx_tree, hf_udx_ack,         tvb, 16, 4, ENC_LITTLE_ENDIAN, &ack);
 
-    col_add_fstr(pinfo->cinfo, COL_INFO, "%u -> %u id=%u seq=%u ack=%u ", pinfo->srcport, pinfo->destport, id, seq, ack);
+    col_add_fstr(pinfo->cinfo, COL_INFO, "%u → %u Id=%u Seq=%u Ack=%u ", pinfo->srcport, pinfo->destport, id, seq, ack);
 
-    if (pkt_type) {
-        col_append_fstr(pinfo->cinfo, COL_INFO, "Flags: ");
+    if (pkt_type == 0) {
+        col_append_fstr(pinfo->cinfo, COL_INFO, "Ack");
     }
 
     for (unsigned int i = 0; i < (sizeof(lookup) / sizeof(lookup[0])); i++) {
@@ -302,18 +302,16 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_)
     unsigned int offset = 20;
 
     if (pkt_type & UDX_HEADER_SACK) {
-        if (data_offset > 0) {
-            while (offset+8 <= data_offset + 20u) {
-                proto_tree_add_item(udx_tree, hf_udx_sack_start, tvb, offset,     4, ENC_LITTLE_ENDIAN);
-                proto_tree_add_item(udx_tree, hf_udx_sack_end,   tvb, offset + 4, 4, ENC_LITTLE_ENDIAN);
-                offset += 8;
-            }
-        } else {
-            while (offset+8 <= tvb_captured_length(tvb)) {
-                proto_tree_add_item(udx_tree, hf_udx_sack_start, tvb, offset,     4, ENC_LITTLE_ENDIAN);
-                proto_tree_add_item(udx_tree, hf_udx_sack_end,   tvb, offset + 4, 4, ENC_LITTLE_ENDIAN);
-                offset += 8;
-            }
+        unsigned int header_end = data_offset ? 20u + data_offset : tvb_captured_length(tvb);
+        col_append_str(pinfo->cinfo, COL_INFO, "Sack=");
+        while (offset+8 <= header_end) {
+            unsigned int sack_start, sack_end;
+            proto_tree_add_item_ret_uint(udx_tree, hf_udx_sack_start, tvb, offset,     4, ENC_LITTLE_ENDIAN, &sack_start);
+            proto_tree_add_item_ret_uint(udx_tree, hf_udx_sack_end,   tvb, offset + 4, 4, ENC_LITTLE_ENDIAN, &sack_end);
+
+            col_append_fstr(pinfo->cinfo, COL_INFO, "%u-%u ", sack_start, sack_end);
+
+            offset += 8;
         }
     }
 
