@@ -462,6 +462,14 @@
      <addaction name="actionStatisticsTcpStreamRoundTripTime"/>
      <addaction name="actionStatisticsTcpStreamWindowScaling"/>
     </widget>
+    <widget class="QMenu" name="menuUdxStreamGraphs">
+     <property name="title">
+      <string>UDX Stream Graphs</string>
+     </property>
+     <addaction name="actionStatisticsUdxStreamStevens"/>
+     <addaction name="actionStatisticsUdxStreamThroughput"/>
+     <addaction name="actionStatisticsUdxStreamRoundTripTime"/>
+    </widget>
     <widget class="QMenu" name="menuBACnet">
      <property name="title">
       <string>BACnet</string>
@@ -569,6 +577,7 @@
     <addaction name="actionStatisticsHTTP2"/>
     <addaction name="actionStatisticsSametime"/>
     <addaction name="menuTcpStreamGraphs"/>
+    <addaction name="menuUdxStreamGraphs"/>
     <addaction name="actionStatisticsUdpMulticastStreams"/>
     <addaction name="menuRSerPool"/>
     <addaction name="actionStatistics_REGISTER_STAT_GROUP_RSERPOOL"/>
@@ -1745,6 +1754,30 @@
    </property>
    <property name="toolTip">
     <string>TCP time sequence graph (tcptrace)</string>
+   </property>
+  </action>
+  <action name="actionStatisticsUdxStreamStevens">
+   <property name="text">
+    <string>Time Sequence (Stevens)</string>
+   </property>
+   <property name="toolTip">
+    <string>UDX time sequence graph (Stevens)</string>
+   </property>
+  </action>
+  <action name="actionStatisticsUdxStreamThroughput">
+   <property name="text">
+    <string>Throughput</string>
+   </property>
+   <property name="toolTip">
+    <string>UDX throughput</string>
+   </property>
+  </action>
+  <action name="actionStatisticsUdxStreamRoundTripTime">
+   <property name="text">
+    <string>Round Trip Time</string>
+   </property>
+   <property name="toolTip">
+    <string>UDX round trip time</string>
    </property>
   </action>
   <action name="actionSCTPAnalyseThisAssociation">

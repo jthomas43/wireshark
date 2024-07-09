@@ -487,6 +487,7 @@ private slots:
     void showEndpointsDialog();
 
     void openTcpStreamDialog(int graph_type);
+    void openUdxStreamDialog(int graph_type);
     void openSCTPAllAssocsDialog();
     void on_actionSCTPShowAllAssociations_triggered();
     void on_actionSCTPAnalyseThisAssociation_triggered();

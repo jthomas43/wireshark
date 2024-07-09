@@ -1192,7 +1192,7 @@ void WiresharkMainWindow::setEditCommentsMenu()
 void WiresharkMainWindow::setMenusForSelectedPacket()
 {
     bool is_ip = false, is_tcp = false, is_udp = false, is_sctp = false, is_tls = false, is_rtp = false, is_lte_rlc = false,
-             is_quic = false, is_exported_pdu = false;
+             is_quic = false, is_exported_pdu = false, is_udx = false;
 
     /* Making the menu context-sensitive allows for easier selection of the
        desired item and has the added benefit, with large captures, of
@@ -1344,6 +1344,10 @@ void WiresharkMainWindow::setMenusForSelectedPacket()
     main_ui_->actionStatisticsTcpStreamTcptrace->setEnabled(is_tcp);
     main_ui_->actionStatisticsTcpStreamThroughput->setEnabled(is_tcp);
     main_ui_->actionStatisticsTcpStreamWindowScaling->setEnabled(is_tcp);
+
+    main_ui_->actionStatisticsUdxStreamStevens->setEnabled(is_udx);
+    main_ui_->actionStatisticsUdxStreamThroughput->setEnabled(is_udx);
+    main_ui_->actionStatisticsUdxStreamRoundTripTime->setEnabled(is_udx);
 
     main_ui_->actionSCTPAnalyseThisAssociation->setEnabled(is_sctp);
     main_ui_->actionSCTPShowAllAssociations->setEnabled(is_sctp);
@@ -3500,6 +3504,10 @@ void WiresharkMainWindow::connectStatisticsMenuActions()
     connect(main_ui_->actionStatisticsTcpStreamRoundTripTime, &QAction::triggered, this, [=]() { openTcpStreamDialog(GRAPH_RTT); });
     connect(main_ui_->actionStatisticsTcpStreamWindowScaling, &QAction::triggered, this, [=]() { openTcpStreamDialog(GRAPH_WSCALE); });
 
+    connect(main_ui_->actionStatisticsUdxStreamStevens, &QAction::triggered, this, [=]() { openUdxStreamDialog(GRAPH_TSEQ_STEVENS); });
+    connect(main_ui_->actionStatisticsUdxStreamThroughput, &QAction::triggered, this, [=]() { openUdxStreamDialog(GRAPH_THROUGHPUT); });
+    connect(main_ui_->actionStatisticsUdxStreamRoundTripTime, &QAction::triggered, this, [=]() { openUdxStreamDialog(GRAPH_RTT); });
+
     connect(main_ui_->actionStatisticsANCP, &QAction::triggered, this, [=]() { openStatisticsTreeDialog("ancp"); });
 
     connect(main_ui_->actionStatisticsBACappInstanceId, &QAction::triggered, this, [=]() { openStatisticsTreeDialog("bacapp_instanceid"); });
@@ -3528,6 +3536,19 @@ void WiresharkMainWindow::openTcpStreamDialog(int graph_type)
     if (stream_dialog->result() == QDialog::Accepted) {
         stream_dialog->show();
     }
+}
+
+void WiresharkMainWindow::openUdxStreamDialog(int graph_type _U_)
+{
+    
+    /*
+    UDXStreamDialog *stream_dialog = new UDXStreamDialog(this, capture_file_.capFile(), (udx_graph_type)graph_type);
+    connect(stream_dialog, &UDXStreamDialog::goToPacket, this, [=](int packet_num) {packet_list_->goToPacket(packet_num);});
+    connect(this, &WiresharkMainWindow::setCaptureFile, stream_dialog, &UDXStreamDialog::setCaptureFile);
+    if (stream_dialog->result() == QDialog::Accepted) {
+        stream_dialog->show();
+    }
+    */
 }
 
 // -z mcast,stat

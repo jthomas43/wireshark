@@ -110,6 +110,7 @@ typedef enum {
     CONVERSATION_ETH_IN,        /* ETHERNET deinterlaced Interface:Y VLAN:N */
     CONVERSATION_ETH_IV,        /* ETHERNET deinterlaced Interface:Y VLAN:Y */
     CONVERSATION_VSPC_VMOTION,	/* VMware vSPC vMotion (Telnet) */
+    CONVERSATION_UDX,           /* UDX */
 } conversation_type;
 
 /*
@@ -157,6 +158,7 @@ typedef enum {
 #define ENDPOINT_MCTP		CONVERSATION_MCTP
 #define ENDPOINT_NVME_MI	CONVERSATION_NVME_MI
 #define ENDPOINT_SNMP		CONVERSATION_SNMP
+#define ENDPOINT_UDX            CONVERSATION_UDX
 
 typedef conversation_type endpoint_type;
 
