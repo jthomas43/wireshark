@@ -15,7 +15,8 @@
  */
 
 #include "config.h"
-/* Define the name for the logging domain (try to avoid collisions with existing domains) */
+/* Define the name for the logging domain (try to avoid collisions with existing
+ * domains) */
 #define WS_LOG_DOMAIN "udx"
 
 /* Global header providing a minimum base set of required macros and APIs */
@@ -29,11 +30,15 @@
 ...
 #endif
 
-#include <epan/packet.h>   /* Required dissection API header */
-#include <epan/expert.h>   /* Include only as needed */
-#include <epan/prefs.h>    /* Include only as needed */
+#include <epan/addr_resolv.h>
 #include <epan/conversation.h>
+#include <epan/epan_dissect.h>
+#include <epan/expert.h> /* Include only as needed */
+#include <epan/follow.h>
+#include <epan/packet.h> /* Required dissection API header */
+#include <epan/prefs.h>  /* Include only as needed */
 #include <epan/proto_data.h>
+#include <epan/to_str.h>
 #include <wsutil/file_util.h>
 
 #if 0
@@ -55,12 +60,16 @@
 
 /* Prototypes */
 /* (Required to prevent [-Wmissing-prototypes] warnings */
-void proto_reg_handoff_udx(void);
-void proto_register_udx(void);
+void
+proto_reg_handoff_udx (void);
+void
+proto_register_udx (void);
+
+// static int udx_tap;
+static int udx_follow_tap;
 
 /* Initialize the protocol and registered fields */
 static int proto_udx;
-
 
 static int hf_udx_magic_byte;
 static int hf_udx_version;
@@ -93,7 +102,7 @@ static int hf_udx_stream;
 static int hf_udx_stream_pnum;
 static int hf_udx_ts_relative;
 static int hf_udx_ts_delta;
-    
+
 static expert_field ei_udx_analysis_retransmission;
 static expert_field ei_udx_analysis_fast_retransmission;
 static expert_field ei_udx_analysis_spurious_retransmission;
@@ -129,7 +138,7 @@ static int ett_udx_timestamps;
 #define UDX_MIN_LENGTH 20
 
 static bool
-test_udx_packet(tvbuff_t *tvb) {
+test_udx_packet (tvbuff_t *tvb) {
     if (tvb_captured_length(tvb) < 20) {
         return false;
     }
@@ -145,11 +154,12 @@ test_udx_packet(tvbuff_t *tvb) {
 
     /* only the 5 lsb are used for flags in version 1 */
     guint8 flags = tvb_get_guint8(tvb, 2);
-    if ( flags & 0xE0) {
+    if (flags & 0xE0) {
         return false;
     }
 
-    /* if data_offset is set packet size must be at least header length + data_offset */
+    /* if data_offset is set packet size must be at least header length +
+     * data_offset */
     guint8 data_offset = tvb_get_guint8(tvb, 3);
     if (data_offset > 0 && tvb_captured_length(tvb) < (20u + data_offset)) {
         return false;
@@ -175,8 +185,7 @@ typedef struct {
 
     uint16_t payload_len;
 
-    
-    #define UDX_MAX_SACK_RANGES 32
+#define UDX_MAX_SACK_RANGES 32
     address ip_src;
     address ip_dst;
 
@@ -211,7 +220,7 @@ typedef struct {
     uint32_t dupack_num;
     uint32_t dupack_frame;
     uint32_t bytes_in_flight;
-    
+
 } udx_acked_t;
 
 typedef struct udx_unacked_s udx_unacked_t;
@@ -220,7 +229,8 @@ struct udx_unacked_s {
     struct udx_unacked_s *next;
     guint32 frame;
     guint32 seq;
-    uint16_t payload_len; /* todo: count bytes in flight on the stream and remove this */
+    uint16_t payload_len; /* todo: count bytes in flight on the stream and remove
+                             this */
     nstime_t ts;
 };
 
@@ -230,25 +240,27 @@ typedef struct {
     uint32_t flags;
     uint32_t remote_id;
     uint32_t window;
-    
+
     bool id_wildcard; // true if return flow has not been seen
 
     // in tcp this is under the optional 'tcp_analyze_seq_info' pointer,
     // for us it's not optional so put it directly in the flow_t struct
 
-    udx_unacked_t *unacked_packets; /* List of packets for which we haven't seen an ACK */
+    udx_unacked_t
+        *unacked_packets; /* List of packets for which we haven't seen an ACK */
 
-    uint16_t packet_count;   /* How many unacked packets we're currently storing */
-    nstime_t lastacktime;    /* Time of the last ack packet */
-    uint32_t lastnondupack;   /* frame number of last seen non dupack */
-    uint32_t dupacknum;       /* dupack number */
-    uint32_t highest_contiguous_seq;  // for identifying when an ack is for a an unseen seq
-    uint32_t high_seq_frame; // frame with highest seq sent
-    nstime_t high_seq_time;    /* Time of the nextseq packet so we can
-                              * distinguish between retransmission,
-                              * fast retransmissions and outoforder
-                              */
-    uint16_t flow_count; // number of flows in this direction
+    uint16_t packet_count;           /* How many unacked packets we're currently storing */
+    nstime_t lastacktime;            /* Time of the last ack packet */
+    uint32_t lastnondupack;          /* frame number of last seen non dupack */
+    uint32_t dupacknum;              /* dupack number */
+    uint32_t highest_contiguous_seq; // for identifying when an ack is for a an
+                                     // unseen seq
+    uint32_t high_seq_frame;         // frame with highest seq sent
+    nstime_t high_seq_time;          /* Time of the nextseq packet so we can
+                                      * distinguish between retransmission,
+                                      * fast retransmissions and outoforder
+                                      */
+    uint16_t flow_count;             // number of flows in this direction
     bool valid_bif;
 
     bool is_closing_initiator;
@@ -256,11 +268,10 @@ typedef struct {
     uint32_t last_packet_flags; // UDX_A_*
 
     // copied from packet_t
-    uint8_t  num_sack_ranges;
+    uint8_t num_sack_ranges;
     uint32_t sack_left_edge[UDX_MAX_SACK_RANGES];
     uint32_t sack_right_edge[UDX_MAX_SACK_RANGES];
 } udx_flow_t;
-
 
 struct udx_stream_s {
     uint32_t stream;
@@ -285,37 +296,39 @@ struct udx_stream_s {
     udx_stream_t *prev;
 
     FILE *file; // for stream data
-    
 };
 
-
-static udx_stream_t*
-get_stream(packet_info *pinfo, udx_packet_t *pkt) {
+static udx_stream_t *
+get_stream (packet_info *pinfo, udx_packet_t *pkt) {
     conversation_t *conv;
 
     uint32_t remote_id = pkt->id;
 
     int direction = cmp_address(&pinfo->src, &pinfo->dst);
-    if (direction ==0) {
+    if (direction == 0) {
         direction = (pinfo->srcport > pinfo->destport) ? 1 : -1;
     }
 
     // we know the remote id, but not necessarily our own id
     // first check for wildcard conversation in our direction
 
-    conv = find_conversation(pinfo->num, &pinfo->src, &pinfo->dst, CONVERSATION_UDX, pinfo->srcport, pinfo->destport, 0);
+    conv =
+        find_conversation(pinfo->num, &pinfo->src, &pinfo->dst, CONVERSATION_UDX, pinfo->srcport, pinfo->destport, 0);
 
     if (!conv) {
-        conv = conversation_new(pinfo->num, &pinfo->src, &pinfo->dst, CONVERSATION_UDX, pinfo->srcport, pinfo->destport, 0);
+        conv =
+            conversation_new(pinfo->num, &pinfo->src, &pinfo->dst, CONVERSATION_UDX, pinfo->srcport, pinfo->destport, 0);
     }
 
-    udx_stream_t *stream = (udx_stream_t *) conversation_get_proto_data(conv, proto_udx);
+    udx_stream_t *stream =
+        (udx_stream_t *) conversation_get_proto_data(conv, proto_udx);
     udx_stream_t *head = stream;
 
     udx_stream_t *wildcard = NULL;
 
     while (stream) {
-        if (stream->flow1.remote_id == remote_id||stream->flow2.remote_id == remote_id) {
+        if (stream->flow1.remote_id == remote_id ||
+            stream->flow2.remote_id == remote_id) {
             break;
         }
         if (stream->flow1.id_wildcard || stream->flow2.id_wildcard) {
@@ -363,8 +376,6 @@ get_stream(packet_info *pinfo, udx_packet_t *pkt) {
             snprintf(filename, 2048, "/tmp/stream-%u.dat", stream->stream);
             stream->file = ws_fopen(filename, "w");
         }
-
-
     }
 
     if (direction >= 0) {
@@ -386,21 +397,16 @@ get_stream(packet_info *pinfo, udx_packet_t *pkt) {
     return stream;
 }
 
-
 typedef struct {
     nstime_t delta_ts;
     uint32_t pnum;
     uint8_t udx_snd_manual_analysis;
-
+    uint32_t stream;
 } udx_per_packet_data_t;
 
+static void
+udx_calculate_timestamps (packet_info *pinfo, udx_stream_t *stream, udx_per_packet_data_t *udxppd) {
 
-static void udx_calculate_timestamps(packet_info *pinfo, udx_stream_t *stream, udx_per_packet_data_t *udxppd) {
-
-    if (!udxppd) {
-        udxppd = wmem_new(wmem_file_scope(), udx_per_packet_data_t);
-        p_add_proto_data(wmem_file_scope(), pinfo, proto_udx, pinfo->curr_layer_num, udxppd);
-    }
     if (!stream) {
         return;
     }
@@ -410,32 +416,29 @@ static void udx_calculate_timestamps(packet_info *pinfo, udx_stream_t *stream, u
 
     stream->ts_prev.secs = pinfo->abs_ts.secs;
     stream->ts_prev.nsecs = pinfo->abs_ts.nsecs;
-
-}
-
-
-static inline bool
-gt_seq(uint32_t s1, uint32_t s2) {
-    return (int32_t)(s2 - s1) < 0;
 }
 
 static inline bool
-lt_seq(uint32_t s1, uint32_t s2) {
-    return (int32_t)(s1 - s2) < 0;
+gt_seq (uint32_t s1, uint32_t s2) {
+    return (int32_t) (s2 - s1) < 0;
 }
 
 static inline bool
-ge_seq(uint32_t s1, uint32_t s2) {
-    return (int32_t)(s2-s1) <= 0;
-}
-static inline bool
-le_seq(uint32_t s1, uint32_t s2) {
-    return (int32_t)(s1-s2) <= 0;
+lt_seq (uint32_t s1, uint32_t s2) {
+    return (int32_t) (s1 - s2) < 0;
 }
 
+static inline bool
+ge_seq (uint32_t s1, uint32_t s2) {
+    return (int32_t) (s2 - s1) <= 0;
+}
+static inline bool
+le_seq (uint32_t s1, uint32_t s2) {
+    return (int32_t) (s1 - s2) <= 0;
+}
 
 static void
-udx_analyze_get_acked_info(uint32_t frame, uint32_t seq, uint32_t ack, bool createflag, udx_stream_t *stream) {
+udx_analyze_get_acked_info (uint32_t frame, uint32_t seq, uint32_t ack, bool createflag, udx_stream_t *stream) {
     wmem_tree_key_t key[4];
 
     key[0].length = 1;
@@ -454,19 +457,20 @@ udx_analyze_get_acked_info(uint32_t frame, uint32_t seq, uint32_t ack, bool crea
         return;
     }
 
-    stream->acked_info = (udx_acked_t *)wmem_tree_lookup32_array(stream->acked_table, key);
-    if((!stream->acked_info) && createflag) {
+    stream->acked_info =
+        (udx_acked_t *) wmem_tree_lookup32_array(stream->acked_table, key);
+    if ((!stream->acked_info) && createflag) {
         stream->acked_info = wmem_new0(wmem_file_scope(), udx_acked_t);
-        wmem_tree_insert32_array(stream->acked_table, key, (void *)stream->acked_info);
+        wmem_tree_insert32_array(stream->acked_table, key, (void *) stream->acked_info);
     }
 }
 
 // some code that uses pkt->flags & UDX_HEADER_DATA should use it instad
 static void
-udx_analyze_sequence_number(packet_info *pinfo, uint32_t seq, uint32_t ack, uint16_t payload_len, uint16_t flags, uint32_t window, udx_stream_t *stream) {
+udx_analyze_sequence_number (packet_info *pinfo, uint32_t seq, uint32_t ack, uint16_t payload_len, uint16_t flags, uint32_t window, udx_stream_t *stream) {
 
     udx_unacked_t *unacked = NULL;
-    
+
     if (!stream) {
         return;
     }
@@ -490,10 +494,17 @@ udx_analyze_sequence_number(packet_info *pinfo, uint32_t seq, uint32_t ack, uint
         // tag packet here? sack replaces reno tcp's duplicate ack for 99% of cases
     }
 
-    if (window && 
-        window == stream->fwd->window && 
-        seq == stream->fwd->seq+1 && ack == stream->fwd->ack && (flags&(UDX_HEADER_DATA|UDX_HEADER_DESTROY|UDX_HEADER_END|UDX_HEADER_MESSAGE)) == 0) {
-        ws_info("duplicate ack: pinfo->num=%u, seq=%u, ack=%u stream->fwd->seq=%u stream->fwd->ack=%u", pinfo->num, seq, ack, stream->fwd->seq, stream->fwd->ack);
+    if (window && window == stream->fwd->window && seq == stream->fwd->seq + 1 &&
+        ack == stream->fwd->ack &&
+        (flags & (UDX_HEADER_DATA | UDX_HEADER_DESTROY | UDX_HEADER_END |
+                  UDX_HEADER_MESSAGE)) == 0) {
+        ws_info("duplicate ack: pinfo->num=%u, seq=%u, ack=%u stream->fwd->seq=%u "
+                "stream->fwd->ack=%u",
+                pinfo->num,
+                seq,
+                ack,
+                stream->fwd->seq,
+                stream->fwd->ack);
         stream->fwd->dupacknum++;
         if (!stream->acked_info) {
             udx_analyze_get_acked_info(pinfo->num, seq, ack, true, stream);
@@ -504,13 +515,12 @@ udx_analyze_sequence_number(packet_info *pinfo, uint32_t seq, uint32_t ack, uint
         stream->acked_info->dupack_frame = stream->fwd->lastnondupack;
     }
 
-
     /* LOST PACKET
-     * if the packet is beyond the last seen nextseq we missed some previous segment
-     * note this is wireshark that missed the segment most likely
+     * if the packet is beyond the last seen nextseq we missed some previous
+     * segment note this is wireshark that missed the segment most likely
      */
 
-    if (stream->fwd->seq && gt_seq(seq, stream->fwd->seq+1)) {
+    if (stream->fwd->seq && gt_seq(seq, stream->fwd->seq + 1)) {
         if (!stream->acked_info) {
             udx_analyze_get_acked_info(pinfo->num, seq, ack, true, stream);
         }
@@ -524,16 +534,17 @@ udx_analyze_sequence_number(packet_info *pinfo, uint32_t seq, uint32_t ack, uint
     /* WINDOW FULL */
     // todo
 
-// finished_fwd:
+    // finished_fwd:
 
     // new ack, reset dupack counters
     if (ack != stream->fwd->ack) {
-        stream->fwd->lastnondupack=pinfo->num;
-        stream->fwd->dupacknum=0;
+        stream->fwd->lastnondupack = pinfo->num;
+        stream->fwd->dupacknum = 0;
     }
 
     /* ACKED LOST PACKET  */
-    if (stream->rev->highest_contiguous_seq && gt_seq(ack, stream->rev->highest_contiguous_seq)) {
+    if (stream->rev->highest_contiguous_seq &&
+        gt_seq(ack, stream->rev->highest_contiguous_seq)) {
         ws_info("todo: acked lost packet");
     }
 
@@ -563,8 +574,9 @@ udx_analyze_sequence_number(packet_info *pinfo, uint32_t seq, uint32_t ack, uint
                 udx_analyze_get_acked_info(pinfo->num, seq, ack, true, stream);
             }
 
-
-            uint64_t t = (pinfo->abs_ts.secs - stream->rev->lastacktime.secs) * 1000000000 + (pinfo->abs_ts.nsecs)-stream->rev->lastacktime.nsecs;
+            uint64_t t =
+                (pinfo->abs_ts.secs - stream->rev->lastacktime.secs) * 1000000000 +
+                (pinfo->abs_ts.nsecs) - stream->rev->lastacktime.nsecs;
 
             if (t < 20000000 && stream->rev->num_sack_ranges > 0) {
                 if (!stream->acked_info) {
@@ -584,7 +596,7 @@ udx_analyze_sequence_number(packet_info *pinfo, uint32_t seq, uint32_t ack, uint
                 }
             }
 
-            stream->acked_info->flags|=UDX_A_RETRANSMISSION;
+            stream->acked_info->flags |= UDX_A_RETRANSMISSION;
 
             // fallback - use this packet for retransmission time
             // nextseqtime / nextseqframe in TCP
@@ -601,7 +613,7 @@ udx_analyze_sequence_number(packet_info *pinfo, uint32_t seq, uint32_t ack, uint
                     nstime_delta(&stream->acked_info->retransmit_ts, &pinfo->abs_ts, &u->ts);
                     stream->acked_info->retransmit_frame = u->frame;
                 }
-                u=u->next;
+                u = u->next;
             }
         }
     }
@@ -632,14 +644,15 @@ finished_checking_retransmission_type:
             stream->fwd->highest_contiguous_seq = seq;
         }
 
-
-        if ((!stream->acked_info) || !(stream->acked_info->flags & UDX_A_RETRANSMISSION || stream->acked_info->flags & UDX_A_SPURIOUS_RETRANSMISSION)) {
+        if ((!stream->acked_info) ||
+            !(stream->acked_info->flags & UDX_A_RETRANSMISSION ||
+              stream->acked_info->flags & UDX_A_SPURIOUS_RETRANSMISSION)) {
 
             if (flags & UDX_HEADER_DATA) {
                 int direction = cmp_address(&pinfo->src, &pinfo->dst);
 
                 if (direction == 0) {
-                    direction = (pinfo->srcport > pinfo->destport)  ? 1 : -1;
+                    direction = (pinfo->srcport > pinfo->destport) ? 1 : -1;
                 }
 
                 if (direction != stream->flow_direction) {
@@ -655,7 +668,7 @@ finished_checking_retransmission_type:
     }
 
     stream->fwd->window = window;
-    stream->fwd->ack=ack;
+    stream->fwd->ack = ack;
     stream->fwd->lastacktime.secs = pinfo->abs_ts.secs;
     stream->fwd->lastacktime.nsecs = pinfo->abs_ts.nsecs;
 
@@ -664,16 +677,18 @@ finished_checking_retransmission_type:
     udx_unacked_t *prev = NULL;
     unacked = stream->rev->unacked_packets;
 
-    while(unacked) {
+    while (unacked) {
 
         // precise match
-        if (ack == unacked->seq+1) {
+        if (ack == unacked->seq + 1) {
             udx_analyze_get_acked_info(pinfo->num, seq, ack, true, stream);
-            // ws_info("frame=%u ack=%u rev->unacked->seq=%u unacked->frame=%u", pinfo->num, ack, unacked->seq + 1, unacked->frame);
+            // ws_info("frame=%u ack=%u rev->unacked->seq=%u unacked->frame=%u",
+            // pinfo->num, ack, unacked->seq + 1, unacked->frame);
             stream->acked_info->frame_acked = unacked->frame;
             nstime_delta(&stream->acked_info->ts, &pinfo->abs_ts, &unacked->ts);
         } else if (ge_seq(unacked->seq, ack)) {
-            // acknowledges a segment prior to this one, leave it alone and move to the next
+            // acknowledges a segment prior to this one, leave it alone and move to
+            // the next
             prev = unacked;
             unacked = unacked->next;
             continue;
@@ -707,7 +722,8 @@ finished_checking_retransmission_type:
         }
 
         for (int i = 0; i < stream->rev->num_sack_ranges; i++) {
-            delivered += stream->rev->sack_right_edge[i] - stream->rev->sack_left_edge[i];
+            delivered +=
+                stream->rev->sack_right_edge[i] - stream->rev->sack_left_edge[i];
         }
 
         in_flight -= delivered;
@@ -721,17 +737,15 @@ finished_checking_retransmission_type:
     }
 }
 static void
-udx_print_retransmission(packet_info *pinfo, tvbuff_t *tvb, proto_tree *flags_tree, proto_item *flags_item, udx_acked_t *ta) {
+udx_print_retransmission (packet_info *pinfo, tvbuff_t *tvb, proto_tree *flags_tree, proto_item *flags_item, udx_acked_t *ta) {
     if (ta->flags & UDX_A_RETRANSMISSION) {
         expert_add_info(pinfo, flags_item, &ei_udx_analysis_retransmission);
         col_prepend_fence_fstr(pinfo->cinfo, COL_INFO, "[UDX Retransmission] ");
 
         if (ta->retransmit_ts.secs || ta->retransmit_ts.nsecs) {
-            flags_item = proto_tree_add_time(flags_tree, hf_udx_analysis_rto,
-                                             tvb, 0, 0, &ta->retransmit_ts);
+            flags_item = proto_tree_add_time(flags_tree, hf_udx_analysis_rto, tvb, 0, 0, &ta->retransmit_ts);
             proto_item_set_generated(flags_item);
-            flags_item = proto_tree_add_uint(flags_tree, hf_udx_analysis_rto_frame,
-                                             tvb, 0, 0, ta->retransmit_frame);
+            flags_item = proto_tree_add_uint(flags_tree, hf_udx_analysis_rto_frame, tvb, 0, 0, ta->retransmit_frame);
             proto_item_set_generated(flags_item);
         }
     }
@@ -741,11 +755,9 @@ udx_print_retransmission(packet_info *pinfo, tvbuff_t *tvb, proto_tree *flags_tr
         expert_add_info(pinfo, flags_item, &ei_udx_analysis_fast_retransmission);
         col_prepend_fence_fstr(pinfo->cinfo, COL_INFO, "[UDX Fast Retransmission] ");
         if (ta->retransmit_ts.secs || ta->retransmit_ts.nsecs) {
-            flags_item = proto_tree_add_time(flags_tree, hf_udx_analysis_rto,
-                                             tvb, 0, 0, &ta->retransmit_ts);
+            flags_item = proto_tree_add_time(flags_tree, hf_udx_analysis_rto, tvb, 0, 0, &ta->retransmit_ts);
             proto_item_set_generated(flags_item);
-            flags_item = proto_tree_add_uint(flags_tree, hf_udx_analysis_rto_frame,
-                                             tvb, 0, 0, ta->retransmit_frame);
+            flags_item = proto_tree_add_uint(flags_tree, hf_udx_analysis_rto_frame, tvb, 0, 0, ta->retransmit_frame);
             proto_item_set_generated(flags_item);
         }
     }
@@ -753,10 +765,9 @@ udx_print_retransmission(packet_info *pinfo, tvbuff_t *tvb, proto_tree *flags_tr
     if (ta->flags & UDX_A_SPURIOUS_RETRANSMISSION) {
         expert_add_info(pinfo, flags_item, &ei_udx_analysis_retransmission);
     }
-
 }
 static void
-udx_print_lost(packet_info *pinfo, proto_item *flags_item, udx_acked_t *ta) {
+udx_print_lost (packet_info *pinfo, proto_item *flags_item, udx_acked_t *ta) {
     if (ta->flags & UDX_A_LOST_PACKET) {
         expert_add_info(pinfo, flags_item, &ei_udx_analysis_lost_packet);
         col_prepend_fence_fstr(pinfo->cinfo, COL_INFO, "[UDX Previous segment not captured] ");
@@ -766,13 +777,14 @@ udx_print_lost(packet_info *pinfo, proto_item *flags_item, udx_acked_t *ta) {
         col_prepend_fence_fstr(pinfo->cinfo, COL_INFO, "[UDX ACKed unseen packet] ");
     }
 }
-static void 
-udx_print_duplicate_acks(packet_info *pinfo, tvbuff_t *tvb, proto_tree *flags_tree, udx_acked_t *ta, proto_tree *tree) {
+static void
+udx_print_duplicate_acks (packet_info *pinfo, tvbuff_t *tvb, proto_tree *flags_tree, udx_acked_t *ta, proto_tree *tree) {
     proto_item *flags_item;
 
     if (ta->dupack_num) {
         if (ta->flags & UDX_A_DUPLICATE_ACK) {
-            flags_item = proto_tree_add_none_format(flags_tree, hf_udx_analysis_duplicate_ack, tvb, 0, 0, "This is a UDX duplicate ack");
+            flags_item =
+                proto_tree_add_none_format(flags_tree, hf_udx_analysis_duplicate_ack, tvb, 0, 0, "This is a UDX duplicate ack");
 
             proto_item_set_generated(flags_item);
             col_prepend_fence_fstr(pinfo->cinfo, COL_INFO, "[UDX Dup ACK %u#%u] ", ta->dupack_frame, ta->dupack_num);
@@ -788,18 +800,17 @@ udx_print_duplicate_acks(packet_info *pinfo, tvbuff_t *tvb, proto_tree *flags_tr
     }
 }
 
-
-
-static void udx_print_bytes_in_flight(packet_info *pinfo _U_, tvbuff_t *tvb, proto_tree *flags_tree, udx_acked_t *ta) {
+static void
+udx_print_bytes_in_flight (packet_info *pinfo _U_, tvbuff_t *tvb, proto_tree *flags_tree, udx_acked_t *ta) {
     if (udx_track_bytes_in_flight) {
-        proto_item *flags_item = proto_tree_add_uint(flags_tree, hf_udx_analysis_bytes_in_flight, tvb , 0, 0, ta->bytes_in_flight);
+        proto_item *flags_item =
+            proto_tree_add_uint(flags_tree, hf_udx_analysis_bytes_in_flight, tvb, 0, 0, ta->bytes_in_flight);
         proto_item_set_generated(flags_item);
     }
 }
-                                      
 
 static void
-udx_print_sequence_number_analysis(packet_info *pinfo, tvbuff_t *tvb, proto_tree *parent_tree, udx_stream_t * stream, uint32_t seq, uint32_t ack) {
+udx_print_sequence_number_analysis (packet_info *pinfo, tvbuff_t *tvb, proto_tree *parent_tree, udx_stream_t *stream, uint32_t seq, uint32_t ack) {
     udx_acked_t *ta = NULL;
     proto_item *item = NULL;
     proto_item *tree = NULL;
@@ -822,11 +833,10 @@ udx_print_sequence_number_analysis(packet_info *pinfo, tvbuff_t *tvb, proto_tree
     item = proto_tree_add_item(parent_tree, hf_udx_analysis, tvb, 0, 0, ENC_NA);
     proto_item_set_generated(item);
 
-    tree=proto_item_add_subtree(item, ett_udx_analysis);
+    tree = proto_item_add_subtree(item, ett_udx_analysis);
 
     if (ta->frame_acked) {
-        item = proto_tree_add_uint(tree, hf_udx_analysis_acks_frame,
-                                   tvb, 0, 0, ta->frame_acked);
+        item = proto_tree_add_uint(tree, hf_udx_analysis_acks_frame, tvb, 0, 0, ta->frame_acked);
         proto_item_set_generated(item);
         if (ta->ts.secs || ta->ts.nsecs) {
             item = proto_tree_add_time(tree, hf_udx_analysis_ack_rtt, tvb, 0, 0, &ta->ts);
@@ -855,8 +865,8 @@ udx_print_sequence_number_analysis(packet_info *pinfo, tvbuff_t *tvb, proto_tree
 }
 
 static char *
-udx_flags_to_string(wmem_allocator_t *scope, const udx_packet_t *pkt) {
-    static char *flags[] = { "DATA", "END", "SACK", "MESSAGE", "DESTROY" };
+udx_flags_to_string (wmem_allocator_t *scope, const udx_packet_t *pkt) {
+    static char *flags[] = {"DATA", "END", "SACK", "MESSAGE", "DESTROY"};
 
     char *buf = wmem_alloc(scope, 64);
     buf[0] = '\0';
@@ -866,7 +876,7 @@ udx_flags_to_string(wmem_allocator_t *scope, const udx_packet_t *pkt) {
     p = g_stpcpy(p, "ACK");
 
     for (int i = 0; i < 5; i++) {
-        if (pkt->flags & (1<<i)) {
+        if (pkt->flags & (1 << i)) {
             p = g_stpcpy(p, ", ");
             p = g_stpcpy(p, flags[i]);
         }
@@ -876,7 +886,7 @@ udx_flags_to_string(wmem_allocator_t *scope, const udx_packet_t *pkt) {
 }
 
 static void
-udx_print_timestamps(packet_info *pinfo, tvbuff_t *tvb, proto_tree *parent_tree, udx_stream_t *stream, udx_per_packet_data_t *udxppd) {
+udx_print_timestamps (packet_info *pinfo, tvbuff_t *tvb, proto_tree *parent_tree, udx_stream_t *stream, udx_per_packet_data_t *udxppd) {
     proto_item *item;
     proto_tree *tree;
     nstime_t ts;
@@ -893,7 +903,9 @@ udx_print_timestamps(packet_info *pinfo, tvbuff_t *tvb, proto_tree *parent_tree,
     proto_item_set_generated(item);
 
     if (!udxppd) {
-        udxppd = (udx_per_packet_data_t *) p_get_proto_data(wmem_file_scope(), pinfo, proto_udx, pinfo->curr_layer_num);
+        udxppd = (udx_per_packet_data_t *) p_get_proto_data(
+            wmem_file_scope(), pinfo, proto_udx, 0
+        );
     }
 
     if (udxppd) {
@@ -904,15 +916,13 @@ udx_print_timestamps(packet_info *pinfo, tvbuff_t *tvb, proto_tree *parent_tree,
 
 /* Code to actually dissect the packets */
 static int
-dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
-        void *data _U_)
-{
+dissect_udx (tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_) {
 
     proto_tree *udx_tree = NULL;
     proto_item *data_item = NULL;
     proto_item *tf_end = NULL;
     proto_item *tf_destroy = NULL;
-    
+
     if (!test_udx_packet(tvb)) {
         return 0;
     }
@@ -935,20 +945,19 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
     pkt->window = tvb_get_guint32(tvb, 8, ENC_LITTLE_ENDIAN);
     pkt->seq = tvb_get_guint32(tvb, 12, ENC_LITTLE_ENDIAN);
     pkt->ack = tvb_get_guint32(tvb, 16, ENC_LITTLE_ENDIAN);
-    
+
     copy_address_shallow(&pkt->ip_src, &pinfo->src);
     copy_address_shallow(&pkt->ip_dst, &pinfo->dst);
-
 
     uint32_t offset = 20;
 
     if (pkt->flags & UDX_HEADER_SACK) {
-        unsigned int header_end = pkt->data_offset ? 20u + pkt->data_offset : tvb_captured_length(tvb);
-        while (offset+8 <= header_end) {
+        unsigned int header_end =
+            pkt->data_offset ? 20u + pkt->data_offset : tvb_captured_length(tvb);
+        while (offset + 8 <= header_end) {
             uint32_t sack_start = tvb_get_guint32(tvb, offset, ENC_LITTLE_ENDIAN);
-            uint32_t sack_end = tvb_get_guint32(tvb, offset+4, ENC_LITTLE_ENDIAN);
-            
-            
+            uint32_t sack_end = tvb_get_guint32(tvb, offset + 4, ENC_LITTLE_ENDIAN);
+
             col_append_fstr(pinfo->cinfo, COL_INFO, "%u:%u ", sack_start, sack_end);
 
             pkt->sack_left_edge[pkt->nsacks] = sack_start;
@@ -964,11 +973,12 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         proto_item *ti = proto_tree_add_item(tree, proto_udx, tvb, 0, -1, ENC_NA);
         udx_tree = proto_item_add_subtree(ti, ett_udx);
 
-        proto_tree_add_item(udx_tree,            hf_udx_magic_byte,  tvb, 0,  1, ENC_LITTLE_ENDIAN);
-        proto_tree_add_item(udx_tree,            hf_udx_version,     tvb, 1,  1, ENC_LITTLE_ENDIAN);
+        proto_tree_add_item(udx_tree, hf_udx_magic_byte, tvb, 0, 1, ENC_LITTLE_ENDIAN);
+        proto_tree_add_item(udx_tree, hf_udx_version, tvb, 1, 1, ENC_LITTLE_ENDIAN);
 
-        proto_item *pi = proto_tree_add_uint_format(udx_tree, hf_udx_flags, tvb, 2, 1, 
-            pkt->flags, "Flags: 0x%02x (%s)", pkt->flags, flags_str);
+        proto_item *pi = proto_tree_add_uint_format(
+            udx_tree, hf_udx_flags, tvb, 2, 1, pkt->flags, "Flags: 0x%02x (%s)", pkt->flags, flags_str
+        );
 
         proto_tree *field_tree = proto_item_add_subtree(pi, ett_udx_flags);
 
@@ -977,49 +987,48 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         proto_tree_add_boolean(field_tree, hf_udx_flags_sack, tvb, 2, 1, pkt->flags);
         proto_tree_add_boolean(field_tree, hf_udx_flags_message, tvb, 2, 1, pkt->flags);
         tf_destroy = proto_tree_add_boolean(field_tree, hf_udx_flags_destroy, tvb, 2, 1, pkt->flags);
-        
-        data_item = proto_tree_add_item(udx_tree,            hf_udx_data_offset, tvb, 3,  1, ENC_LITTLE_ENDIAN);
-        proto_tree_add_item(udx_tree,   hf_udx_id,          tvb, 4,  4, ENC_LITTLE_ENDIAN);
-        proto_tree_add_item(udx_tree,   hf_udx_window,      tvb, 8,  4, ENC_LITTLE_ENDIAN);
-        proto_tree_add_item(udx_tree,   hf_udx_seq,         tvb, 12, 4, ENC_LITTLE_ENDIAN);
-        proto_tree_add_item(udx_tree,   hf_udx_ack,         tvb, 16, 4, ENC_LITTLE_ENDIAN);
+
+        data_item = proto_tree_add_item(udx_tree, hf_udx_data_offset, tvb, 3, 1, ENC_LITTLE_ENDIAN);
+        proto_tree_add_item(udx_tree, hf_udx_id, tvb, 4, 4, ENC_LITTLE_ENDIAN);
+        proto_tree_add_item(udx_tree, hf_udx_window, tvb, 8, 4, ENC_LITTLE_ENDIAN);
+        proto_tree_add_item(udx_tree, hf_udx_seq, tvb, 12, 4, ENC_LITTLE_ENDIAN);
+        proto_tree_add_item(udx_tree, hf_udx_ack, tvb, 16, 4, ENC_LITTLE_ENDIAN);
 
         if (pkt->flags & UDX_HEADER_SACK) {
-            unsigned int header_end = pkt->data_offset ? 20u + pkt->data_offset : tvb_captured_length(tvb);
-            while (offset+8 <= header_end) {
-                proto_tree_add_item(udx_tree, hf_udx_sack_start, tvb, offset,     4, ENC_LITTLE_ENDIAN);
-                proto_tree_add_item(udx_tree, hf_udx_sack_end,   tvb, offset + 4, 4, ENC_LITTLE_ENDIAN);
+            unsigned int header_end =
+                pkt->data_offset ? 20u + pkt->data_offset : tvb_captured_length(tvb);
+            while (offset + 8 <= header_end) {
+                proto_tree_add_item(udx_tree, hf_udx_sack_start, tvb, offset, 4, ENC_LITTLE_ENDIAN);
+                proto_tree_add_item(udx_tree, hf_udx_sack_end, tvb, offset + 4, 4, ENC_LITTLE_ENDIAN);
             }
         }
     }
-
 
     col_add_fstr(pinfo->cinfo, COL_INFO, "%u -> %u id=%u seq=%u ack=%u ", pkt->sport, pkt->dport, pkt->id, pkt->seq, pkt->ack);
 
     col_append_str(pinfo->cinfo, COL_INFO, "ACK");
 
-    if (pkt->flags & UDX_HEADER_DATA ) 
+    if (pkt->flags & UDX_HEADER_DATA)
         col_append_sep_str(pinfo->cinfo, COL_INFO, ",", "DATA");
-    if (pkt->flags & UDX_HEADER_END ) 
+    if (pkt->flags & UDX_HEADER_END)
         col_append_sep_str(pinfo->cinfo, COL_INFO, ",", "END");
-    if (pkt->flags & UDX_HEADER_SACK ) {
+    if (pkt->flags & UDX_HEADER_SACK) {
         col_append_sep_str(pinfo->cinfo, COL_INFO, ",", "SACK");
         for (int i = 0; i < pkt->nsacks; i++) {
             col_append_sep_fstr(pinfo->cinfo, COL_INFO, " ", "%u-%u", pkt->sack_left_edge[i], pkt->sack_right_edge[i]);
         }
     }
-    if (pkt->flags & UDX_HEADER_MESSAGE ) 
+    if (pkt->flags & UDX_HEADER_MESSAGE)
         col_append_sep_str(pinfo->cinfo, COL_INFO, ",", "MSG");
-    if (pkt->flags & UDX_HEADER_DESTROY ) 
+    if (pkt->flags & UDX_HEADER_DESTROY)
         col_append_sep_str(pinfo->cinfo, COL_INFO, ",", "DESTROY");
 
     if (tvb_captured_length(tvb) > offset) {
-        proto_tree_add_item(udx_tree, hf_udx_payload,     tvb, offset, -1, ENC_NA);
+        proto_tree_add_item(udx_tree, hf_udx_payload, tvb, offset, -1, ENC_NA);
     }
 
     if (pkt->flags & UDX_HEADER_SACK) {
     }
-
 
     udx_stream_t *stream = get_stream(pinfo, pkt);
 
@@ -1027,10 +1036,14 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         ws_info("first data packet for stream %u in direction %u", stream->stream, stream->flow_direction);
     }
 
-    udx_per_packet_data_t *udxppd = NULL;
+    udx_per_packet_data_t *udxppd = p_get_proto_data(wmem_file_scope(), pinfo, proto_udx, 0);
+
+    if (!udxppd) {
+        udxppd = wmem_new(wmem_file_scope(), udx_per_packet_data_t);
+        p_add_proto_data(wmem_file_scope(), pinfo, proto_udx, 0, udxppd);
+    }
 
     if (udx_calculate_ts) {
-        udxppd = p_get_proto_data(wmem_file_scope(), pinfo,proto_udx, pinfo->curr_layer_num);
 
         if (!pinfo->fd->visited) {
             udx_calculate_timestamps(pinfo, stream, udxppd);
@@ -1041,11 +1054,14 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         if (udx_tree) {
             proto_item_set_generated(proto_tree_add_uint(udx_tree, hf_udx_stream, tvb, offset, 0, stream->stream));
             if (udxppd) {
-                proto_item_set_generated(proto_tree_add_uint(udx_tree, hf_udx_stream_pnum, tvb, offset, 0, udxppd->pnum));
+                proto_item_set_generated(proto_tree_add_uint(
+                    udx_tree, hf_udx_stream_pnum, tvb, offset, 0, udxppd->pnum
+                ));
             }
         }
 
         pkt->stream = stream->stream;
+        udxppd->stream = stream->stream;
 
         // for UI conversation callbacks
         pinfo->stream_id = stream->stream;
@@ -1067,11 +1083,10 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         udx_analyze_sequence_number(pinfo, pkt->seq, pkt->ack, pkt->payload_len, pkt->flags, pkt->window, stream);
     }
 
-
     /* If this protocol has a sub-dissector call it here, see section 1.8 of
      * README.dissector for more information. */
 
-     // create and add expert item
+    // create and add expert item
 
     if (pkt->data_offset && !(pkt->flags & UDX_HEADER_SACK)) {
         // ws_info("mtu probe found");
@@ -1116,28 +1131,167 @@ dissect_udx(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree,
         ;
     }
 
-    if (stream && stream->acked_info && udx_write_stream_dat_file && stream->file != NULL) {
+    if (!pinfo->fd->visited && stream && stream->acked_info &&
+        udx_write_stream_dat_file && stream->file != NULL) {
 
         nstime_t relative_ts;
         nstime_delta(&relative_ts, &pinfo->abs_ts, &stream->ts_first);
-        
-        uint64_t time_ms = relative_ts.secs * 1000 + (relative_ts.nsecs / 1000000);
-        
-        fprintf(stream->file, "%lu %u\n", time_ms, stream->acked_info->bytes_in_flight );
-    }
 
+        uint64_t time_ms = relative_ts.secs * 1000 + (relative_ts.nsecs / 1000000);
+
+        fprintf(stream->file, "%lu %u\n", time_ms, stream->acked_info->bytes_in_flight);
+    }
 
     /* Return the amount of data this dissector was able to dissect (which may
      * or may not be the total captured packet as we return here). */
     return tvb_captured_length(tvb);
 }
 
-static void udx_init(void) {
-    ;
+static void
+udx_init (void) { ; }
+
+static void
+udx_cleanup (void) { ; }
+
+// register_follow_stream(proto_udx,
+//     "udx_follow",
+//     udx_follow_conv_filter,
+//     udx_follow_index_filter,
+//     udx_follow_address_filter,
+//      udx_port_to_display,
+//       follow_udx_tap_listener,
+//        get_udx_stream_count,
+//         NULL);
+
+// follow conversation callbacks
+
+char *
+udx_follow_conv_filter (epan_dissect_t *edt _U_, packet_info *pinfo, uint32_t *streamid, uint32_t *sub_stream _U_) {
+    conversation_t *conv = find_conversation(pinfo->num, &pinfo->src, &pinfo->dst, CONVERSATION_UDX, pinfo->srcport, pinfo->destport, 0);
+    if (!conv) return NULL;
+
+    udx_stream_t *stream = (udx_stream_t *) conversation_get_proto_data(conv, proto_udx);
+
+    if (!stream) return NULL;
+
+    udx_per_packet_data_t *udxppd = (udx_per_packet_data_t *) p_get_proto_data(wmem_file_scope(), pinfo, proto_udx, 0);
+    ws_info("udxppd=%p", udxppd);
+
+    if (!udxppd) return NULL;
+
+    uint32_t id = udxppd->stream;
+    *streamid = id;
+
+    ws_info("udx_follow_conv_filter id=%u", id);
+    return ws_strdup_printf("udx.stream eq %u", id);
 }
 
-static void udx_cleanup(void) {
-    ;
+char *
+udx_follow_index_filter (uint32_t stream, uint32_t sub_stream _U_) {
+    ws_info("udx_follow_index_filter");
+    return ws_strdup_printf("udx.stream eq %u", stream);
+}
+
+char *
+udx_follow_address_filter (address *src_addr, address *dst_addr, int src_port, int dst_port) {
+    ws_info("udx_follow_address_filter");
+
+    const gchar *ip_version = src_addr->type == AT_IPv6 ? "v6" : "";
+    gchar src_addr_str[WS_INET6_ADDRSTRLEN];
+    gchar dst_addr_str[WS_INET6_ADDRSTRLEN];
+
+    address_to_str_buf(src_addr, src_addr_str, sizeof(src_addr_str));
+    address_to_str_buf(dst_addr, dst_addr_str, sizeof(dst_addr_str));
+
+    return ws_strdup_printf("((ip%s.src eq %s and tcp.srcport eq %d) and "
+                            "(ip%s.dst eq %s and tcp.dstport eq %d))"
+                            " or "
+                            "((ip%s.src eq %s and tcp.srcport eq %d) and "
+                            "(ip%s.dst eq %s and tcp.dstport eq %d))",
+                            ip_version,
+                            src_addr_str,
+                            src_port,
+                            ip_version,
+                            dst_addr_str,
+                            dst_port,
+                            ip_version,
+                            dst_addr_str,
+                            dst_port,
+                            ip_version,
+                            src_addr_str,
+                            src_port);
+}
+
+typedef struct {
+    tvbuff_t *tvb;
+    udx_packet_t *pkt;
+    udx_stream_t *stream;
+} udx_follow_tap_data_t;
+
+static tap_packet_status
+follow_udx_tap_listener (void *tapdata, packet_info *pinfo, epan_dissect_t *edt _U_, const void *data, tap_flags_t flags _U_) {
+    ws_info("follow_udx_tap_listener");
+
+    follow_info_t *follow_info = (follow_info_t *) tapdata;
+    udx_follow_tap_data_t *follow_data = (udx_follow_tap_data_t *) data;
+
+    uint32_t seq = follow_data->pkt->seq;
+    uint32_t len = follow_data->pkt->payload_len;
+    uint32_t data_offset = 20;
+    uint32_t data_length = tvb_captured_length(follow_data->tvb);
+
+    // we'll consider the person we see send data first the 'client' for follow_info->client_*
+
+    if (follow_info->client_port == 0) {
+        follow_info->client_port = pinfo->srcport;
+        copy_address(&follow_info->client_ip, &pinfo->src);
+        follow_info->server_port = pinfo->destport;
+        copy_address(&follow_info->server_ip, &pinfo->dst);
+    }
+
+    bool is_server = !(addresses_equal(&follow_info->client_ip, &pinfo->src) && follow_info->client_port == pinfo->srcport);
+
+    if (follow_info->bytes_written[is_server] == 0 && follow_info->seq[is_server] == 0) {
+        follow_info->seq[is_server] = seq;
+    }
+
+    // for now, let's bail if we see a gap (don't keep OOO buffer)
+
+    // if (lt_seq(seq, follow_info->seq[is_server])) {
+    // ws_info("sequence may cover a gap (todo)");
+    // }
+
+    ws_info("follow_tap: seq=%u len=%u data_offset=%u data_length=%u", seq, len, data_offset, data_length);
+
+    if (len == 0 || lt_seq(seq, follow_info->seq[is_server])) {
+        return TAP_PACKET_DONT_REDRAW;
+    }
+
+    follow_record_t *follow_record = g_new0(follow_record_t, 1);
+    follow_record->is_server = is_server;
+    follow_record->packet_num = pinfo->fd->num;
+    follow_record->abs_ts = pinfo->fd->abs_ts;
+    follow_record->seq = seq; /* start of fragment, used by check_follow_fragments. */
+    follow_record->data = g_byte_array_append(g_byte_array_new(), tvb_get_ptr(follow_data->tvb, data_offset, data_length), data_length);
+
+    if (seq == follow_info->seq[is_server]) {
+        follow_info->seq[is_server] = seq + 1;
+        follow_info->bytes_written[is_server] += follow_record->data->len;
+        follow_info->payload = g_list_prepend(follow_info->payload, follow_record);
+
+        // while(check_follow_fragments(follow_info, is_server, 0, pinfo->fd->num, false));
+    } else {
+        ws_warning("missing data in tap!");
+        // follow_info->fragments[is_server] = g_list_append(follow_info->fragments[is_server], follow_record);
+        return TAP_PACKET_FAILED;
+    }
+
+    return TAP_PACKET_DONT_REDRAW;
+}
+
+static uint32_t
+get_udx_stream_count (void) {
+    return udx_stream_count;
 }
 
 /* Register the protocol with Wireshark.
@@ -1146,335 +1300,135 @@ static void udx_cleanup(void) {
  * calls all the protocol registration.
  */
 void
-proto_register_udx(void)
-{
+proto_register_udx (void) {
     /* Setup list of header fields  See Section 1.5 of README.dissector for
      * details. */
 
     static hf_register_info hf[] = {
         {
             &hf_udx_magic_byte,
-            {
-                "UDX Magic Byte",
-                "udx.magic_byte",
-                FT_UINT8,
-                BASE_HEX,
-                NULL,
-                0x0,
-                NULL,
-                HFILL
-            },
-        }, {
+            {"UDX Magic Byte", "udx.magic_byte", FT_UINT8, BASE_HEX, NULL, 0x0, NULL, HFILL},
+        },
+        {
             &hf_udx_version,
-            {
-                "Version",
-                "udx.version",
-                FT_UINT8,
-                BASE_DEC,
-                NULL,
-                0x0,
-                NULL,
-                HFILL
-            },
-        }, {
-            &hf_udx_flags,
-            {
-                "UDX Flags",
-                "udx.flags", FT_UINT8, BASE_HEX, NULL, 0x1f, 
-                "The flags set in the UDX header", HFILL
-            }
-        }, {
+            {"Version", "udx.version", FT_UINT8, BASE_DEC, NULL, 0x0, NULL, HFILL},
+        },
+        {&hf_udx_flags,
+         {"UDX Flags", "udx.flags", FT_UINT8, BASE_HEX, NULL, 0x1f, "The flags set in the UDX header", HFILL}},
+        {
             &hf_udx_flags_data,
-            {
-                "Data",
-                "udx.flags.data",
-                FT_BOOLEAN,
-                5,
-                TFS(&tfs_set_notset),
-                UDX_HEADER_DATA,
-                "This flag indicates the packet has a payload",
-                HFILL
-            },
-        }, {
-             &hf_udx_flags_end,
-            {
-                "End",
-                "udx.flags.end",
-                FT_BOOLEAN,
-                5,
-                TFS(&tfs_set_notset),
-                UDX_HEADER_END,
-                NULL,
-                HFILL
-            },
-        }, {
-             &hf_udx_flags_sack,
-            {
-                "SACK",
-                "udx.flags.sack",
-                FT_BOOLEAN,
-                5,
-                TFS(&tfs_set_notset),
-                UDX_HEADER_SACK,
-                NULL,
-                HFILL
-            },
-        }, {
-             &hf_udx_flags_message,
-            {
-                "Message",
-                "udx.flags.message",
-                FT_BOOLEAN,
-                5,
-                TFS(&tfs_set_notset),
-                UDX_HEADER_MESSAGE,
-                NULL,
-                HFILL
-            },
-        }, {
-             &hf_udx_flags_destroy,
-            {
-                "Destroy",
-                "udx.flags.destroy",
-                FT_BOOLEAN,
-                5,
-                TFS(&tfs_set_notset),
-                UDX_HEADER_DESTROY,
-                NULL,
-                HFILL
-            },
-        }, {
+            {"Data", "udx.flags.data", FT_BOOLEAN, 5, TFS(&tfs_set_notset), UDX_HEADER_DATA, "This flag indicates the packet has a payload", HFILL},
+        },
+        {
+            &hf_udx_flags_end,
+            {"End", "udx.flags.end", FT_BOOLEAN, 5, TFS(&tfs_set_notset), UDX_HEADER_END, NULL, HFILL},
+        },
+        {
+            &hf_udx_flags_sack,
+            {"SACK", "udx.flags.sack", FT_BOOLEAN, 5, TFS(&tfs_set_notset), UDX_HEADER_SACK, NULL, HFILL},
+        },
+        {
+            &hf_udx_flags_message,
+            {"Message", "udx.flags.message", FT_BOOLEAN, 5, TFS(&tfs_set_notset), UDX_HEADER_MESSAGE, NULL, HFILL},
+        },
+        {
+            &hf_udx_flags_destroy,
+            {"Destroy", "udx.flags.destroy", FT_BOOLEAN, 5, TFS(&tfs_set_notset), UDX_HEADER_DESTROY, NULL, HFILL},
+        },
+        {
             &hf_udx_data_offset,
-            {
-                "Data Offset",
-                "udx.offset",
-                FT_UINT8,
-                BASE_HEX,
-                NULL,
-                0x0,
-                NULL,
-                HFILL
-            },
-        }, {
+            {"Data Offset", "udx.offset", FT_UINT8, BASE_HEX, NULL, 0x0, NULL, HFILL},
+        },
+        {
             &hf_udx_id,
-            {
-                "Id",
-                "udx.id",
-                FT_UINT32,
-                BASE_DEC,
-                NULL,
-                0x0,
-                NULL,
-                HFILL
-            },
-        }, {
+            {"Id", "udx.id", FT_UINT32, BASE_DEC, NULL, 0x0, NULL, HFILL},
+        },
+        {
             &hf_udx_window,
-            {
-                "Window",
-                "udx.window",
-                FT_UINT32,
-                BASE_DEC,
-                NULL,
-                0x0,
-                NULL,
-                HFILL
-            },
-        }, {
+            {"Window", "udx.window", FT_UINT32, BASE_DEC, NULL, 0x0, NULL, HFILL},
+        },
+        {
             &hf_udx_seq,
-            {
-                "Sequence",
-                "udx.seq",
-                FT_UINT32,
-                BASE_DEC,
-                NULL,
-                0x0,
-                NULL,
-                HFILL
-            },
-        }, {
-            &hf_udx_ack,
-            {
-                "Ack",
-                "udx.ack", FT_UINT32, BASE_DEC, NULL, 0x0,
-                NULL, HFILL
-            }
-        }, {
-            &hf_udx_sack_start, 
-            {
-                "Sack start",
-                "udx.sack.start", FT_UINT32, BASE_DEC, NULL, 0x0,
-                NULL, HFILL
-            }
-        }, {
-            &hf_udx_sack_end, 
-            {
-                "Sack end",
-                "udx.sack.end", FT_UINT32, BASE_DEC, NULL, 0x0,
-                NULL, HFILL
-            }
-        }, 
-        { 
-            &hf_udx_analysis,
-            {
-                "SEQ/ACK analysis",
-                "udx.analysis", FT_NONE, BASE_NONE, NULL, 0x0,
-                "This frame has some SEQ/ACK analysis info", HFILL
-            }
+            {"Sequence", "udx.seq", FT_UINT32, BASE_DEC, NULL, 0x0, NULL, HFILL},
         },
-        {
-            &hf_udx_analysis_flags,
-            {
-                "UDX Analysis Flags",
-                "udx.analysis.flags", FT_NONE, BASE_NONE, NULL, 0x0,
-                "This frame has some of the UDX analysis flags set", HFILL
-            }
-        },
-        {
-            &hf_udx_analysis_duplicate_ack,
-            {
-                "Duplicate ACK",
-                "udx.analysis.duplicate_ack", FT_NONE, BASE_NONE, NULL, 0x0,
-                "This is a duplicate ack", HFILL
-            }
-        }, {
-            &hf_udx_analysis_duplicate_ack_num,
-            {
-                "Duplicate ACK #",
-                "udx.analysis.duplicate_ack_num", FT_UINT32, BASE_DEC, NULL, 0x0,
-                "This is duplicate ack #", HFILL
-            }
-        }, {
-            &hf_udx_analysis_duplicate_ack_frame,
-            {
-                "Duplicate to the ACK in frame",
-                "udx.analysis.duplicate_ack_frame", FT_FRAMENUM, BASE_NONE, FRAMENUM_TYPE(FT_FRAMENUM_DUP_ACK), 0x0,
-                "this is a duplicate to the ACK in frame #", HFILL 
-            }
-        }, {
-            &hf_udx_analysis_acks_frame,
-            {
-                "This is an ACK to the packet in frame",
-                "udx.analysis.acks_frame", FT_FRAMENUM, BASE_NONE, FRAMENUM_TYPE(FT_FRAMENUM_ACK), 0x0,
-                "Which previous packet is this an ACK for", HFILL
-            }
-        }, {
-            &hf_udx_analysis_bytes_in_flight,
-            {
-                "Bytes in flight",
-                "udx.analysis.bytes_in_flight", FT_UINT32, BASE_DEC, NULL, 0x0, 
-                "Bytes are now in flight for this stream", HFILL
-            }
-        }, {
-            &hf_udx_analysis_ack_rtt,
-            {
-                "the RTT to ACK the segment was",
-                "udx.analysis.ack_rtt", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0,
-                "How long it took to ACK the segment (RTT)", HFILL
-            }
-        }, {
-            &hf_udx_analysis_first_rtt,
-            {
-                "iRTT",
-                "udx.analysis.first_rtt", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0,
-                "how long the first packet took to be acked", HFILL
-            }
-        }, {
-            &hf_udx_analysis_rto,
-            {
-                "how long before this segment was retransmitted",
-                "udx.analysis.rto", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0,
-                "How long retransmission was delayed", HFILL
-            }
-        }, {
-            &hf_udx_analysis_rto_frame,
-            {
-                "RTO based on delta from frame",
-                "udx.analsysis.rto_frame", FT_FRAMENUM, BASE_NONE, NULL, 0x0,
-                "This is the frame we measured the retransmit delay from", HFILL
-            }
-        }, {
-            &hf_udx_payload,
-            {
-                "Payload",
-                "udx.payload", FT_BYTES, BASE_NONE, NULL, 0x0, 
-                "The UDX payload of this packet", HFILL
-            }
-        }, {
-            &hf_udx_stream,
-            {
-                "Stream Number",
-                "udx.stream", FT_UINT32, BASE_DEC, NULL, 0x0, 
-                NULL, HFILL }
-        }, {
-            &hf_udx_stream_pnum, 
-            { 
-                "Stream Packet Number", 
-                "udx.stream.pnum", FT_UINT32, BASE_DEC, NULL, 0x0, 
-                "Relative packet number in this UDX stream", HFILL
-            }
-        }, {
-            &hf_udx_ts_relative,
-            {
-                "Time since first frame in  this stream",
-                "udx.time_relative", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0,
-                "Time since last packet in this UDX stream", HFILL
-            }
-        },  {
-            &hf_udx_ts_delta,
-            {
-                "Time since previous frame in this UDX stream",
-                "udx.time_delta", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0,
-                "Time delta from previous frame in this UDX stream", HFILL
-            }
-        }
+        {&hf_udx_ack,
+         {"Ack", "udx.ack", FT_UINT32, BASE_DEC, NULL, 0x0, NULL, HFILL}},
+        {&hf_udx_sack_start,
+         {"Sack start", "udx.sack.start", FT_UINT32, BASE_DEC, NULL, 0x0, NULL, HFILL}},
+        {&hf_udx_sack_end,
+         {"Sack end", "udx.sack.end", FT_UINT32, BASE_DEC, NULL, 0x0, NULL, HFILL}},
+        {&hf_udx_analysis,
+         {"SEQ/ACK analysis", "udx.analysis", FT_NONE, BASE_NONE, NULL, 0x0, "This frame has some SEQ/ACK analysis info", HFILL}},
+        {&hf_udx_analysis_flags,
+         {"UDX Analysis Flags", "udx.analysis.flags", FT_NONE, BASE_NONE, NULL, 0x0, "This frame has some of the UDX analysis flags set", HFILL}},
+        {&hf_udx_analysis_duplicate_ack,
+         {"Duplicate ACK", "udx.analysis.duplicate_ack", FT_NONE, BASE_NONE, NULL, 0x0, "This is a duplicate ack", HFILL}},
+        {&hf_udx_analysis_duplicate_ack_num,
+         {"Duplicate ACK #", "udx.analysis.duplicate_ack_num", FT_UINT32, BASE_DEC, NULL, 0x0, "This is duplicate ack #", HFILL}},
+        {&hf_udx_analysis_duplicate_ack_frame,
+         {"Duplicate to the ACK in frame", "udx.analysis.duplicate_ack_frame", FT_FRAMENUM, BASE_NONE, FRAMENUM_TYPE(FT_FRAMENUM_DUP_ACK), 0x0, "this is a duplicate to the ACK in frame #", HFILL}},
+        {&hf_udx_analysis_acks_frame,
+         {"This is an ACK to the packet in frame", "udx.analysis.acks_frame", FT_FRAMENUM, BASE_NONE, FRAMENUM_TYPE(FT_FRAMENUM_ACK), 0x0, "Which previous packet is this an ACK for", HFILL}},
+        {&hf_udx_analysis_bytes_in_flight,
+         {"Bytes in flight", "udx.analysis.bytes_in_flight", FT_UINT32, BASE_DEC, NULL, 0x0, "Bytes are now in flight for this stream", HFILL}},
+        {&hf_udx_analysis_ack_rtt,
+         {"the RTT to ACK the segment was", "udx.analysis.ack_rtt", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0, "How long it took to ACK the segment (RTT)", HFILL}},
+        {&hf_udx_analysis_first_rtt,
+         {"iRTT", "udx.analysis.first_rtt", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0, "how long the first packet took to be acked", HFILL}},
+        {&hf_udx_analysis_rto,
+         {"how long before this segment was retransmitted", "udx.analysis.rto", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0, "How long retransmission was delayed", HFILL}},
+        {&hf_udx_analysis_rto_frame,
+         {"RTO based on delta from frame", "udx.analsysis.rto_frame", FT_FRAMENUM, BASE_NONE, NULL, 0x0, "This is the frame we measured the retransmit delay from", HFILL}},
+        {&hf_udx_payload,
+         {"Payload", "udx.payload", FT_BYTES, BASE_NONE, NULL, 0x0, "The UDX payload of this packet", HFILL}},
+        {&hf_udx_stream,
+         {"Stream Number", "udx.stream", FT_UINT32, BASE_DEC, NULL, 0x0, NULL, HFILL}},
+        {&hf_udx_stream_pnum,
+         {"Stream Packet Number", "udx.stream.pnum", FT_UINT32, BASE_DEC, NULL, 0x0, "Relative packet number in this UDX stream", HFILL}},
+        {&hf_udx_ts_relative,
+         {"Time since first frame in  this stream", "udx.time_relative", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0, "Time since last packet in this UDX stream", HFILL}},
+        {&hf_udx_ts_delta,
+         {"Time since previous frame in this UDX stream", "udx.time_delta", FT_RELATIVE_TIME, BASE_NONE, NULL, 0x0, "Time delta from previous frame in this UDX stream", HFILL}}
     };
-
 
     /* Setup protocol subtree array */
-    static int *ett[] = {
-        &ett_udx,
-        &ett_udx_completeness,
-        &ett_udx_flags,
-        &ett_udx_sack,
-        &ett_udx_analysis,
-        &ett_udx_timestamps
-    };
+    static int *ett[] = {&ett_udx, &ett_udx_completeness, &ett_udx_flags, &ett_udx_sack, &ett_udx_analysis, &ett_udx_timestamps};
 
     /* Setup protocol expert items */
 
     static ei_register_info ei[] = {
-        {
-            &ei_udx_analysis_retransmission,
-            { "udx.analysis.retransmission", PI_SEQUENCE, PI_WARN, "packet is retransmitted", EXPFILL }
-        }, {
-            &ei_udx_analysis_fast_retransmission,
-            { "udx.analysis.fast_retransmission", PI_SEQUENCE, PI_NOTE, "packet is a suspected fast retransmission", EXPFILL }
-        }, {
-            &ei_udx_analysis_spurious_retransmission,
-            { "udx.analysis.spurious_retransmission", PI_SEQUENCE, PI_NOTE, "packet is a spurious retransmission", EXPFILL }
-        }, {
-            &ei_udx_analysis_lost_packet,
-            { "udx.analysis.lost_packet", PI_SEQUENCE, PI_WARN, "Previous packet not captured (common at capture start)", EXPFILL, }
-        }, {
-            &ei_udx_analysis_ack_lost_packet,
-            { "udx.analysis.ack_lost_packet", PI_SEQUENCE, PI_WARN, "ACKed packet not captured (common at capture start)", EXPFILL, }
-        }, {
-            &ei_udx_connection_end,
-            { "udx.connection.end", PI_SEQUENCE, PI_NOTE, "packet ends traffic in this direction", EXPFILL }
-        }, {
-            &ei_udx_connection_end_active,
-            { "udx.connection.end_active", PI_SEQUENCE, PI_NOTE, "This frame initiates the connection closing", EXPFILL }
-        },
-        { 
-            &ei_udx_connection_end_passive,
-            { "udx.connection.end_passive", PI_SEQUENCE, PI_NOTE, "This frame undergoes the connection closing", EXPFILL }
-        }, {
-            &ei_udx_connection_destroy,
-            { "udx.connection.destroy", PI_SEQUENCE, PI_WARN, "this frame destroys the connection", EXPFILL }
-        }, {
-            &ei_udx_mtu_mtuprobe,
-            { "udx.mtuprobe", PI_COMMENTS_GROUP, PI_CHAT, "packet is an MTU probe", EXPFILL }
-        }
+        {&ei_udx_analysis_retransmission,
+         {"udx.analysis.retransmission", PI_SEQUENCE, PI_WARN, "packet is retransmitted", EXPFILL}},
+        {&ei_udx_analysis_fast_retransmission,
+         {"udx.analysis.fast_retransmission", PI_SEQUENCE, PI_NOTE, "packet is a suspected fast retransmission", EXPFILL}},
+        {&ei_udx_analysis_spurious_retransmission,
+         {"udx.analysis.spurious_retransmission", PI_SEQUENCE, PI_NOTE, "packet is a spurious retransmission", EXPFILL}},
+        {&ei_udx_analysis_lost_packet,
+         {
+             "udx.analysis.lost_packet",
+             PI_SEQUENCE,
+             PI_WARN,
+             "Previous packet not captured (common at capture start)",
+             EXPFILL,
+         }},
+        {&ei_udx_analysis_ack_lost_packet,
+         {
+             "udx.analysis.ack_lost_packet",
+             PI_SEQUENCE,
+             PI_WARN,
+             "ACKed packet not captured (common at capture start)",
+             EXPFILL,
+         }},
+        {&ei_udx_connection_end,
+         {"udx.connection.end", PI_SEQUENCE, PI_NOTE, "packet ends traffic in this direction", EXPFILL}},
+        {&ei_udx_connection_end_active,
+         {"udx.connection.end_active", PI_SEQUENCE, PI_NOTE, "This frame initiates the connection closing", EXPFILL}},
+        {&ei_udx_connection_end_passive,
+         {"udx.connection.end_passive", PI_SEQUENCE, PI_NOTE, "This frame undergoes the connection closing", EXPFILL}},
+        {&ei_udx_connection_destroy,
+         {"udx.connection.destroy", PI_SEQUENCE, PI_WARN, "this frame destroys the connection", EXPFILL}},
+        {&ei_udx_mtu_mtuprobe,
+         {"udx.mtuprobe", PI_COMMENTS_GROUP, PI_CHAT, "packet is an MTU probe", EXPFILL}}
     };
 
     /* Register the protocol name and description */
@@ -1494,8 +1448,7 @@ proto_register_udx(void)
      * multiple uniquely named dissectors that behave differently
      * depending on the caller, e.g. over TCP directly vs over TLS.
      */
-    udx_handle = register_dissector("udx", dissect_udx,
-            proto_udx);
+    udx_handle = register_dissector("udx", dissect_udx, proto_udx);
 
     /* Register a preferences module (see section 2.6 of README.dissector
      * for more details). Registration of a prefs callback is not required
@@ -1505,31 +1458,18 @@ proto_register_udx(void)
      * proto_reg_handoff_udx in the following.
      */
 
-    // module_t *udx_module = prefs_register_protocol(proto_udx,
-    //         proto_reg_handoff_udx);
-
-    /* Register a preferences module under the preferences subtree.
-     * Only use this function instead of prefs_register_protocol (above) if you
-     * want to group preferences of several protocols under one preferences
-     * subtree.
-     *
-     * Argument subtree identifies grouping tree node name, several subnodes can
-     * be specified using slash '/' (e.g. "OSI/X.500" - protocol preferences
-     * will be accessible under Protocols->OSI->X.500-><PROTOSHORTNAME>
-     * preferences node.
-     */
-    // udx_module = prefs_register_protocol_subtree(const char *subtree,
-    //         proto_udx, proto_reg_handoff_udx);
+    module_t *udx_module =
+        prefs_register_protocol(proto_udx, proto_reg_handoff_udx);
 
     // /* Register a simple example preference */
-    // prefs_register_bool_preference(udx_module, "show_hex",
-    //         "Display numbers in Hex",
-    //         "Enable to display numerical values in hexadecimal.",
-    //         &pref_hex);
+    prefs_register_bool_preference(
+        udx_module, "write_stream_dat_file", "write stream .dat files", "Enable to write stream-%u.dat files to /tmp for graphing", &udx_write_stream_dat_file
+    );
+
+    register_follow_stream(proto_udx, "udx_follow", udx_follow_conv_filter, udx_follow_index_filter, udx_follow_address_filter, udp_port_to_display, follow_udx_tap_listener, get_udx_stream_count, NULL);
 
     register_init_routine(udx_init);
     register_cleanup_routine(udx_cleanup);
-
 }
 
 /* If this dissector uses sub-dissector registration add a registration routine.
@@ -1549,7 +1489,7 @@ proto_register_udx(void)
  */
 
 static bool
-dissect_udx_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree * tree, void *data) {
+dissect_udx_heur (tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data) {
     if (!test_udx_packet(tvb)) {
         return false;
     }
@@ -1562,8 +1502,7 @@ dissect_udx_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree * tree, void *dat
 }
 
 void
-proto_reg_handoff_udx(void)
-{
+proto_reg_handoff_udx (void) {
 
     // 1. create dissector handle
     udx_handle = create_dissector_handle(dissect_udx, proto_udx);
@@ -1574,11 +1513,14 @@ proto_reg_handoff_udx(void)
     heur_dissector_add("udp", dissect_udx_heur, "UDX", "udx", proto_udx, HEURISTIC_ENABLE);
 
     // 3. register as a normal dissector so we can apply it manually.
-    // might be useful in instances where 'socket' send/recv is used on a connection
-    // to send non-udx packets, causing our heuristic to be passed over.
+    // might be useful in instances where 'socket' send/recv is used on a
+    // connection to send non-udx packets, causing our heuristic to be passed
+    // over.
 
     dissector_add_uint("udp.port", UDX_PORT, udx_handle);
 
+    // udx_tap = register_tap("udx");
+    udx_follow_tap = register_tap("udx_follow");
 }
 
 /*
