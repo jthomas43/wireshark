@@ -298,6 +298,12 @@ struct udx_stream_s {
     FILE *file; // for stream data
 };
 
+typedef struct {
+    tvbuff_t *tvb;
+    udx_packet_t *pkt;
+    udx_stream_t *stream;
+} udx_follow_tap_data_t;
+
 static udx_stream_t *
 get_stream (packet_info *pinfo, udx_packet_t *pkt) {
     conversation_t *conv;
@@ -494,7 +500,7 @@ udx_analyze_sequence_number (packet_info *pinfo, uint32_t seq, uint32_t ack, uin
         // tag packet here? sack replaces reno tcp's duplicate ack for 99% of cases
     }
 
-    if (window && window == stream->fwd->window && seq == stream->fwd->seq + 1 &&
+    if (window && window == stream->fwd->window && seq == stream->fwd->seq &&
         ack == stream->fwd->ack &&
         (flags & (UDX_HEADER_DATA | UDX_HEADER_DESTROY | UDX_HEADER_END |
                   UDX_HEADER_MESSAGE)) == 0) {
@@ -634,15 +640,16 @@ finished_checking_retransmission_type:
     // store highest number seen so far for nextseq
 
     if (gt_seq(seq, stream->fwd->seq)) {
+
+        if (seq == stream->fwd->seq + 1) {
+            stream->fwd->highest_contiguous_seq = seq;
+        }
+
         // todo: if we do window probes, exempt this code
         stream->fwd->seq = seq;
         stream->fwd->high_seq_frame = pinfo->num;
         stream->fwd->high_seq_time.secs = pinfo->abs_ts.secs;
         stream->fwd->high_seq_time.nsecs = pinfo->abs_ts.nsecs;
-
-        if (seq == stream->fwd->seq + 1) {
-            stream->fwd->highest_contiguous_seq = seq;
-        }
 
         if ((!stream->acked_info) ||
             !(stream->acked_info->flags & UDX_A_RETRANSMISSION ||
@@ -1127,8 +1134,14 @@ dissect_udx (tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data _U_
     uint32_t captured_length_remaining = tvb_captured_length_remaining(tvb, 20);
 
     if (pkt->flags & UDX_HEADER_DATA && captured_length_remaining != 0) {
-        // todo: sub dissector
-        ;
+        if (have_tap_listener(udx_follow_tap)) {
+            udx_follow_tap_data_t *follow_data = wmem_new0(pinfo->pool, udx_follow_tap_data_t);
+            follow_data->tvb = tvb_new_subset_remaining(tvb, 20 + pkt->data_offset);
+            follow_data->stream = stream;
+            follow_data->pkt = pkt;
+
+            tap_queue_packet(udx_follow_tap, pinfo, follow_data);
+        }
     }
 
     if (!pinfo->fd->visited && stream && stream->acked_info &&
@@ -1222,12 +1235,6 @@ udx_follow_address_filter (address *src_addr, address *dst_addr, int src_port, i
                             src_port);
 }
 
-typedef struct {
-    tvbuff_t *tvb;
-    udx_packet_t *pkt;
-    udx_stream_t *stream;
-} udx_follow_tap_data_t;
-
 static tap_packet_status
 follow_udx_tap_listener (void *tapdata, packet_info *pinfo, epan_dissect_t *edt _U_, const void *data, tap_flags_t flags _U_) {
     ws_info("follow_udx_tap_listener");
@@ -1237,7 +1244,7 @@ follow_udx_tap_listener (void *tapdata, packet_info *pinfo, epan_dissect_t *edt 
 
     uint32_t seq = follow_data->pkt->seq;
     uint32_t len = follow_data->pkt->payload_len;
-    uint32_t data_offset = 20;
+    uint32_t data_offset = 0;
     uint32_t data_length = tvb_captured_length(follow_data->tvb);
 
     // we'll consider the person we see send data first the 'client' for follow_info->client_*
