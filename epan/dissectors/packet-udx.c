@@ -235,8 +235,9 @@ struct udx_unacked_s {
 };
 
 typedef struct {
-    uint32_t seq; // highest seen seq. nextseq = seq+1
-    uint32_t ack; // seqinfo->lastack in tcp
+    uint32_t seq;      // highest seen seq. nextseq = seq+1
+    uint32_t next_seq; // next expected sequence
+    uint32_t ack;      // seqinfo->lastack in tcp
     uint32_t flags;
     uint32_t remote_id;
     uint32_t window;
@@ -249,18 +250,16 @@ typedef struct {
     udx_unacked_t
         *unacked_packets; /* List of packets for which we haven't seen an ACK */
 
-    uint16_t packet_count;           /* How many unacked packets we're currently storing */
-    nstime_t lastacktime;            /* Time of the last ack packet */
-    uint32_t lastnondupack;          /* frame number of last seen non dupack */
-    uint32_t dupacknum;              /* dupack number */
-    uint32_t highest_contiguous_seq; // for identifying when an ack is for a an
-                                     // unseen seq
-    uint32_t high_seq_frame;         // frame with highest seq sent
-    nstime_t high_seq_time;          /* Time of the nextseq packet so we can
-                                      * distinguish between retransmission,
-                                      * fast retransmissions and outoforder
-                                      */
-    uint16_t flow_count;             // number of flows in this direction
+    uint16_t packet_count;   /* How many unacked packets we're currently storing */
+    nstime_t lastacktime;    /* Time of the last ack packet */
+    uint32_t lastnondupack;  /* frame number of last seen non dupack */
+    uint32_t dupacknum;      /* dupack number */
+    uint32_t high_seq_frame; // frame with highest seq sent
+    nstime_t high_seq_time;  /* Time of the nextseq packet so we can
+                              * distinguish between retransmission,
+                              * fast retransmissions and outoforder
+                              */
+    uint16_t flow_count;     // number of flows in this direction
     bool valid_bif;
 
     bool is_closing_initiator;
@@ -526,7 +525,7 @@ udx_analyze_sequence_number (packet_info *pinfo, uint32_t seq, uint32_t ack, uin
      * segment note this is wireshark that missed the segment most likely
      */
 
-    if (stream->fwd->seq && gt_seq(seq, stream->fwd->seq + 1)) {
+    if (stream->fwd->next_seq && gt_seq(seq, stream->fwd->next_seq)) {
         if (!stream->acked_info) {
             udx_analyze_get_acked_info(pinfo->num, seq, ack, true, stream);
         }
@@ -549,17 +548,22 @@ udx_analyze_sequence_number (packet_info *pinfo, uint32_t seq, uint32_t ack, uin
     }
 
     /* ACKED LOST PACKET  */
-    if (stream->rev->highest_contiguous_seq &&
-        gt_seq(ack, stream->rev->highest_contiguous_seq)) {
-        ws_info("todo: acked lost packet");
-    }
+    // if (stream->rev->max_seq_acked && gt_seq(ack, stream->rev->max_seq_acked)) {
+
+    //     if (!stream->acked_info) {
+    //         udx_analyze_get_acked_info(pinfo->num, seq, ack, true, stream);
+    //     }
+    //
+    //     ws_info("todo: acked lost packet pinfo->num=%u ack=%u rev_seq=%u", pinfo->num, ack, stream->rev->next_seq);
+    // }
 
     /* RETRANSMISSION / FAST RETRANSMISSION / OUT OF ORDER
      * has data and does not advace the sequence number
      */
 
     if (flags & UDX_HEADER_DATA) {
-        bool seq_not_advanced = stream->fwd->seq && le_seq(seq, stream->fwd->seq);
+        // bool seq_not_advanced = stream->fwd->seq && le_seq(seq, stream->fwd->seq);
+        bool seq_not_advanced = stream->fwd->seq && lt_seq(seq, stream->fwd->next_seq);
 
         // check for spurious retransmission
         if (lt_seq(seq, stream->rev->ack)) {
@@ -603,6 +607,8 @@ udx_analyze_sequence_number (packet_info *pinfo, uint32_t seq, uint32_t ack, uin
             }
 
             stream->acked_info->flags |= UDX_A_RETRANSMISSION;
+            // bool seq_not_advanced = stream->fwd->seq && le_seq(seq, stream->fwd->seq);
+            ws_info("retransmit: frame=%u seq=%u stream->fwd->seq=%u stream->fwd->next_seq=%u", pinfo->num, seq, stream->fwd->seq, stream->fwd->next_seq);
 
             // fallback - use this packet for retransmission time
             // nextseqtime / nextseqframe in TCP
@@ -641,12 +647,9 @@ finished_checking_retransmission_type:
 
     if (gt_seq(seq, stream->fwd->seq)) {
 
-        if (seq == stream->fwd->seq + 1) {
-            stream->fwd->highest_contiguous_seq = seq;
-        }
-
         // todo: if we do window probes, exempt this code
         stream->fwd->seq = seq;
+        stream->fwd->next_seq = seq + ((flags & UDX_HEADER_DATA) ? 1 : 0);
         stream->fwd->high_seq_frame = pinfo->num;
         stream->fwd->high_seq_time.secs = pinfo->abs_ts.secs;
         stream->fwd->high_seq_time.nsecs = pinfo->abs_ts.nsecs;
